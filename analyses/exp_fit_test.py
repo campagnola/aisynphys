@@ -121,14 +121,14 @@ if __name__ == '__main__':
 
 
     for method in methods:
-
-        dtype.extend(method.dtype)
-        name = method.name
+        pfx = method.name + '_'
+        for field in method.dtype:
+            dtype.append((pfx + field[0], field[1]))
         dtype.extend([
-            (name+'_true_err', float),
+            (pfx+'true_err', float),
         ]
         for par_name in method.params:
-            dtype.append(
+            dtype.append((pfx + par_name + '_err', float))
 
 
     examples = np.empty(N, dtype=dtype)
@@ -157,41 +157,48 @@ if __name__ == '__main__':
 
 
     results = []
-    with mp.Parallelize(range(N), results=results, progressDialog="fitting, don't you think?", workers=1) as tasker:
-        for i in tasker:
+    # with mp.Parallelize(range(N), results=results, progressDialog="fitting, don't you think?", workers=1) as tasker:
+        # for i in tasker:
+    with pg.ProgressDialog("fitting, don't you think?", maximum=N) as dlg:
+        for i in range(N):
             ex = examples[i]
             y = ex['y']
             t = ex['t']
-
-            fit = fit_exp(t, y)
-
-            tasker.results.append((fit.x, fit.fun, fit.success, fit.nfev))
+            result = {}
+            for method in methods:
+                result[method.name] = method.fit(t, y)
+            results.append(result)
+            dlg += 1
 
 
     with pg.ProgressDialog("quantifying life mistakes..", maximum=N) as dlg:
         for i,result in enumerate(results):
-            fit_x, fit_err, fit_success, fit_nfev = result
-            ex = examples[i]
+            for method_name, fit in result:
+                ex = examples[i]
 
-            x = ex['x']
-            true_y = ex['true_y']
-            fit_y = exp_fn(fit_x, t)
-            true_err = np.linalg.norm(true_y - fit_y)
+                x = ex['x']
+                true_y = ex['true_y']
+                fit_y = exp_fn(fit_x, t)
+                true_err = np.linalg.norm(true_y - fit_y)
 
-            ex['fit_yoffset'] = fit_x[0]
-            ex['fit_amp'] = fit_x[1]
-            ex['fit_tau'] = fit_x[2]
-            ex['fit'] = fit
-            ex['fit_y'] = fit_y
-            ex['fit_err'] = fit_err
-            ex['true_err'] = true_err
-            ex['yoffset_err'] = x[0] - fit_x[0]
-            ex['amp_err'] = x[1] - fit_x[1]
-            ex['tau_err'] = x[2] - fit_x[2]
-            ex['fit_success'] = fit_success
-            ex['fit_nfev'] = fit_nfev
+                pfx = method.name + '_'
+                for i,param in enumerate(method.params):
+                    ex[pfx+param] = 
 
-            dlg += 1
+                ex['fit_yoffset'] = fit_x[0]
+                ex['fit_amp'] = fit_x[1]
+                ex['fit_tau'] = fit_x[2]
+                ex['fit'] = fit
+                ex['fit_y'] = fit_y
+                ex['fit_err'] = fit_err
+                ex['true_err'] = true_err
+                ex['yoffset_err'] = x[0] - fit_x[0]
+                ex['amp_err'] = x[1] - fit_x[1]
+                ex['tau_err'] = x[2] - fit_x[2]
+                ex['fit_success'] = fit_success
+                ex['fit_nfev'] = fit_nfev
+
+                dlg += 1
 
     plt = pg.plot()
 
