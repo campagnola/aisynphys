@@ -3,9 +3,78 @@ For exploring and comparing curve fitting methods.
 """
 import time
 import numpy as np
+import sympy
 import scipy.optimize, scipy.ndimage
 import pyqtgraph as pg
 import pyqtgraph.multiprocess as mp
+
+
+"""
+import time
+import sympy
+
+yoff, amp, tau, i, n = sympy.symbols('yoff amp tau i n')
+t = sympy.IndexedBase('t')
+y = sympy.IndexedBase('y')
+err = sympy.sqrt(sympy.summation((y[i] - yoff + amp * sympy.exp(-t[i] / tau))**2, [i, 0, n]))
+derr_dtau = sympy.diff(err, tau)
+derr_dtau_fn = sympy.lambdify([yoff, amp, tau, t, y, n], derr_dtau, modules=['sympy'])
+
+start = time.time(); derr_dtau.evalf(subs={'amp': 1, 'yoff': 0, 'tau': 0.5, 'n': 2, 't': sympy.Array([0, 1, 2]), 'y': sympy.Array([5, 4, 3])}); print(time.time() - start)
+start = time.time(); derr_dtau_fn(0, 1, 0.5, sympy.Array([0., 1, 2]), sympy.Array([5., 4, 3]), 2); print(time.time() - start)
+
+
+
+
+
+import time
+import sympy
+import inspect
+import numba
+
+
+
+import sympy.printing.lambdarepr as SPL
+class NumbaPrinter(SPL.NumPyPrinter):
+    def _print_Sum(self, expr):
+        code = ['tot_ = 0']
+        indent = ''
+        for i, a, b in expr.limits:
+            code.append('{ind}for {i} in range({a}, {b}+1)'.format(ind=indent, i=self._print(i), a=self._print(a), b=self._print(b)))
+            indent += '    '
+        code.append('{ind}tot += {function}'.format(ind=indent, function=self._print(expr.function)))
+        return '\n'.join(code)
+
+i, n = sympy.symbols('i n')
+y = sympy.IndexedBase('y')
+expr = sympy.summation(y[i]+1, [i, 0, n-1])
+fn = sympy.lambdify([y, n], expr, printer=NumbaPrinter, modules=['numpy'])
+
+print(inspect.getsource(fn))
+
+jit_fn = numba.jit(fn)
+
+import numpy as np
+a = np.arange(20000)
+
+start = time.time(); fn(a, len(a)); print(time.time() - start)
+start = time.time(); (a+1).sum(); print(time.time() - start)
+start = time.time(); jit_fn(a, len(a)); print(time.time() - start)
+
+
+"""
+import sympy.printing.lambdarepr as SPL
+class NumbaPrinter(SPL.NumPyPrinter):
+    def _print_Sum(self, expr):
+        loops = (
+            'for {i} in range({a}, {b}+1)'.format(
+                i=self._print(i),
+                a=self._print(a),
+                b=self._print(b))
+            for i, a, b in expr.limits)
+        return '(sum({function} {loops}))'.format(
+            function=self._print(expr.function),
+            loops=' '.join(loops))
 
 
 class ExpFitMethod:
@@ -24,10 +93,27 @@ class ExpFitMethod:
         ('fit_time', float),
     ]
 
+    _jac_fns = None
+
     def __init__(self, name, use_jac=True, method=None):
         self.name = name
         self.method = method
         self.use_jac = use_jac
+
+        if use_jac and self._jac_fns is None:
+            self._compile_jac()
+
+    @classmethod
+    def _compile_jac(cls):
+        yoff, amp, tau, i, n = sympy.symbols('yoff amp tau i n')
+        t = sympy.IndexedBase('t')
+        y = sympy.IndexedBase('y')
+        err = sympy.sqrt(sympy.summation((y[i] - yoff + amp * sympy.exp(-t[i] / tau))**2, [i, 0, n]))
+        cls._jac_fns = (
+            sympy.lambdify([yoff, amp, tau, t, y, n], sympy.diff(err, yoff), modules=['sympy']),
+            sympy.lambdify([yoff, amp, tau, t, y, n], sympy.diff(err, amp), modules=['sympy']),
+            sympy.lambdify([yoff, amp, tau, t, y, n], sympy.diff(err, tau), modules=['sympy']),
+        )
     
     def fit(self, y, t):
         start = time.time()
@@ -66,18 +152,23 @@ class ExpFitMethod:
         residual = y - ExpFitMethod.exp_fn(params, t)
         return np.linalg.norm(residual)
 
-    @staticmethod
-    def exp_jac_fn(params, t, y):
-        x0, x1, x2 = params
+    @classmethod
+    def exp_jac_fn(cls, params, t, y):
+
+        yoff, amp, tau = params
         N = len(y)
+        """
+        norm = np.sqrt(((yoff + amp * np.exp(-t/tau) - y) ** 2).sum())
+        exp_t_tau = np.exp(-t / tau)
+        dyoff = (N * yoff + (amp * exp_t_tau).sum() - y.sum()) / norm
+        damp = ((yoff + amp * exp_t_tau - y) * exp_t_tau).sum() / norm
+        dtau = (amp * (yoff + amp* exp_t_tau - y) * exp_t_tau * t / tau**2).sum() / norm
 
-        norm = np.sqrt(((x0 + x1 * np.exp(-t/x2) - y) ** 2).sum())
-        exp_t_tau = np.exp(-t / x2)
-        dx0 = (N * x0 + (x1 * exp_t_tau).sum() - y.sum()) / norm
-        dx1 = ((x0 + x1 * exp_t_tau - y) * exp_t_tau).sum() / norm
-        dx2 = (x1 * (x0 + x1* exp_t_tau - y) * exp_t_tau * t / x2**2).sum() / norm
-
-        return np.array([dx0, dx1, dx2])
+        return np.array([dyoff, damp, dtau])
+        """
+        t = sympy.Array(t)
+        y = sympy.Array(y)
+        return np.array([fn(yoff, amp, tau, t, y, N-1) for fn in cls._jac_fns])
 
 
 class ExpGenerator:
@@ -134,7 +225,7 @@ if __name__ == '__main__':
     pg.dbg()
 
     sample_rate = 50000
-    N = 1000
+    N = 10
 
     generator = ExpGenerator(duration=0.4, sample_rate=sample_rate)
     
