@@ -1,7 +1,7 @@
 """
 For exploring and comparing curve fitting methods.
 """
-import time
+import os, pickle, time
 import numpy as np
 import sympy
 import scipy.optimize, scipy.ndimage
@@ -10,7 +10,7 @@ import pyqtgraph.multiprocess as mp
 from neuroanalysis.fitting import Psp
 from neuroanalysis.data import TSeries
 from keras.models import Sequential
-from keras.layers import Dense
+from keras.layers import Dense, Dropout
 
 
 class ExpFitMethod:
@@ -161,7 +161,7 @@ class ExpGenerator:
 class PspFitMethod:
     params = ['yoffset', 'amp', 'rise_time', 'decay_tau']
     dtype = [
-        ('fit', object),
+        # ('fit', object),
         ('yoffset', float),
         ('amp', float),
         ('rise_time', float),
@@ -206,7 +206,7 @@ class PspFitMethod:
         args = (t, y)
         fit = scipy.optimize.minimize(fun=self.psp_err_fn, x0=init, args=args, method=self.method, bounds=bounds)
         return {
-            'fit': fit,
+            # 'fit': fit,
             'yoffset': fit.x[0],
             'amp': fit.x[1],
             'rise_time': fit.x[2],
@@ -239,7 +239,7 @@ class PspFitMethod:
 class PspMLMethod:
     params = ['yoffset', 'amp', 'rise_time', 'decay_tau']
     dtype = [
-        ('fit', object),
+        # ('fit', object),
         ('yoffset', float),
         ('amp', float),
         ('rise_time', float),
@@ -254,8 +254,9 @@ class PspMLMethod:
         self.name = name
 
         model = Sequential()
-        model.add(Dense(500, input_dim=input_size, kernel_initializer='normal', activation='relu'))
+        model.add(Dense(100, input_dim=input_size, kernel_initializer='normal', activation='relu'))
         model.add(Dense(40, kernel_initializer='normal', activation='relu'))
+        model.add(Dense(10, kernel_initializer='normal', activation='relu'))
         model.add(Dense(4, kernel_initializer='normal'))
         model.compile(loss='mean_squared_error', optimizer='adam')
 
@@ -288,7 +289,7 @@ class PspMLMethod:
         #     print(train_output[:, i].mean(), train_output[:, i].std())
         #     print(train_output_scaled[:, i].mean(), train_output_scaled[:, i].std())
 
-        ep = self.model.fit(train_input_scaled, train_output_scaled, epochs=10)
+        ep = self.model.fit(train_input_scaled, train_output_scaled, epochs=1)
         self.epochs.append(ep)
         # self.train_history.append(ep.history['loss'][0])
 
@@ -399,6 +400,7 @@ class PspGenerator:
         noise_amp = np.random.uniform(0.001, 0.003)
         noise = noise_amp * np.random.normal(size=n_samp + len(kernel_t))
         noise = np.convolve(noise, kernel, 'valid')
+        noise -= noise[:int(0.01/self.template.dt)].mean()
 
         return noise[:n_samp]
 
@@ -410,9 +412,9 @@ if __name__ == '__main__':
     sample_rate = 50000
     duration = 0.1
     n_samp = int(duration * sample_rate)
-    n_train = 2000
-    n_test = 500
-    n_epochs = 200
+    n_train = 50000
+    n_test = 2000
+    n_epochs = 20
 
     # generator = ExpGenerator(duration=0.4, sample_rate=sample_rate)
     
@@ -448,33 +450,41 @@ if __name__ == '__main__':
 
     examples = np.empty((n_train + n_test), dtype=dtype)
 
-    with pg.ProgressDialog("making some noise..", maximum=examples.shape[0]) as dlg:
-        for i in range(examples.shape[0]):
-            ex = generator.make_example()
-            for k,v in ex.items():
-                examples[i][k] = v
-            dlg += 1
-            if dlg.wasCanceled():
-                raise Exception("User cancel")
+    example_cache = 'examples.pkl'
+    if os.path.exists(example_cache):
+        examples = pickle.load(open(example_cache, 'rb'))
+    else:
+        with pg.ProgressDialog("making some noise..", maximum=examples.shape[0]) as dlg:
+            for i in range(examples.shape[0]):
+                ex = generator.make_example()
+                for k,v in ex.items():
+                    examples[i][k] = v
+                dlg += 1
+                if dlg.wasCanceled():
+                    raise Exception("User cancel")
 
-        examples[:n_train]['training'] = True
-        examples[n_train:]['training'] = False
+            examples[:n_train]['training'] = True
+            examples[n_train:]['training'] = False
 
-        n_params = len(generator.params)
-        example_len = len(examples[0]['data'])
-        train_params = np.empty((n_train, n_params))
-        train_data = np.empty((n_train, example_len))
-        test_params = np.empty((n_test, n_params))
-        test_data = np.empty((n_test, example_len))
-        for i in range(n_train):
-            train_params[i] = examples[i]['params']
-            train_data[i] = examples[i]['data'].data
-        for i in range(n_test):
-            test_params[i] = examples[n_train+i]['params']
-            test_data[i] = examples[n_train+i]['data'].data        
+        tmp = example_cache + '.tmp'
+        pickle.dump(examples, open(tmp, 'wb'))
+        os.rename(tmp, example_cache)
+
+    n_params = len(generator.params)
+    example_len = len(examples[0]['data'])
+    train_params = np.empty((n_train, n_params))
+    train_data = np.empty((n_train, example_len))
+    test_params = np.empty((n_test, n_params))
+    test_data = np.empty((n_test, example_len))
+    for i in range(n_train):
+        train_params[i] = examples[i]['params']
+        train_data[i] = examples[i]['data'].data
+    for i in range(n_test):
+        test_params[i] = examples[n_train+i]['params']
+        test_data[i] = examples[n_train+i]['data'].data        
 
 
-    with pg.ProgressDialog("training hard..", maximum=n_train) as dlg:
+    with pg.ProgressDialog("training hard..", maximum=n_epochs) as dlg:
         train_plt = pg.plot()
         train_plt.addLegend()
 
@@ -529,10 +539,12 @@ if __name__ == '__main__':
     sp.setFields(fields)
     sp.setData(examples)
 
-    # ch = sp.colorMap.addNew('fit_success')
-    # ch['Values', 'True'] = 'g'
-    # ch['Values', 'False'] = 'r'
+    ch = sp.colorMap.addNew('training')
+    ch['Values', 'True'] = 'g'
+    ch['Values', 'False'] = 'y'
 
+    ch = sp.filter.addNew('nn_predict_true_err')
+    ch['Max'] = 100
 
     sp.show()
 
