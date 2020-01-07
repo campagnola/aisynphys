@@ -8,6 +8,7 @@ import scipy.optimize, scipy.ndimage
 import pyqtgraph as pg
 import pyqtgraph.multiprocess as mp
 from neuroanalysis.fitting import Psp
+from neuroanalysis.data import TSeries
 from keras.models import Sequential
 from keras.layers import Dense
 
@@ -50,7 +51,9 @@ class ExpFitMethod:
             sympy.lambdify([yoff, amp, tau, t, y, n], sympy.diff(err, tau), modules=['sympy']),
         )
     
-    def fit(self, y, t):
+    def fit(self, data):
+        y = data.data
+        t = data.time_values
         start = time.time()
         yoff = y[-1]
         amp = y[0] - yoff
@@ -176,13 +179,23 @@ class PspFitMethod:
     def __init__(self, name, method=None):
         self.name = name
         self.method = method
-    
-    def fit(self, y, t):
+
+    def train_epoch(self, train_x, train_y, test_x, test_y):
+        pass
+
+    def plot_training_history(self, plt):
+        pass
+
+    def fit(self, data):
+        y = data.data
+        t = data.time_values
         start = time.time()
-        yoff = y[-1]
-        amp = y[0] - yoff
-        decay_tau = t[-1] - t[0]
-        rise_time = decay_tau / 3.
+        yoff = y[0]
+        pos_amp = y.max() - yoff
+        neg_amp = y.min() - yoff
+        amp = neg_amp if abs(neg_amp) > pos_amp else pos_amp
+        decay_tau = 20e-3
+        rise_time = 3e-3
         init = (yoff, amp, rise_time, decay_tau)
         bounds = [
             (-1, 1),
@@ -232,31 +245,94 @@ class PspMLMethod:
         ('rise_time', float),
         ('decay_tau', float),
         ('init_yoffset', float),
-        ('init_amp', float),
+        ('init_yscale', float),
+        ('init_tscale', float),
         ('fit_time', float),
     ]
 
-    def __init__(self, name, model=None):
+    def __init__(self, name, input_size):
         self.name = name
+
+        model = Sequential()
+        model.add(Dense(500, input_dim=input_size, kernel_initializer='normal', activation='relu'))
+        model.add(Dense(40, kernel_initializer='normal', activation='relu'))
+        model.add(Dense(4, kernel_initializer='normal'))
+        model.compile(loss='mean_squared_error', optimizer='adam')
+
         self.model = model
-    
-    def fit(self, y, t):
+        self.train_history = []
+        self.test_history = []
+        self.epochs = []
+
+    def train_epoch(self, train_input, train_output, test_input, test_output):
+        assert np.all(np.isfinite(train_input))
+        assert np.all(np.isfinite(train_output))
+        
+        yoffset = train_input[:, :1]
+        yscale = 100.0
+        tscale = 100.0
+
+        train_input_scaled = (train_input - yoffset) * yscale
+
+        train_output_scaled = np.empty_like(train_output)
+
+        train_output_scaled[:, 0] = (train_output[:, 0] - yoffset[:,0]) * yscale
+        train_output_scaled[:, 1] = train_output[:, 1] * yscale
+        train_output_scaled[:, 2] = train_output[:, 2] * tscale
+        train_output_scaled[:, 3] = train_output[:, 3] * tscale
+
+        # print("fit:")
+        # print(train_input_scaled.mean(), train_input_scaled.std())
+        # for i in range(4):
+        #     print(i)
+        #     print(train_output[:, i].mean(), train_output[:, i].std())
+        #     print(train_output_scaled[:, i].mean(), train_output_scaled[:, i].std())
+
+        ep = self.model.fit(train_input_scaled, train_output_scaled, epochs=10)
+        self.epochs.append(ep)
+        # self.train_history.append(ep.history['loss'][0])
+
+        for input, output, hist in [
+            (train_input, train_output, self.train_history), 
+            (test_input, test_output, self.test_history)]: 
+
+            err = np.mean([np.linalg.norm(np.array(self.fit(input[i])['fit']) - output[i]) for i in range(len(input))])
+            hist.append(err)
+
+    def plot_training_history(self, plt):
+        plt.plot(self.train_history, pen='g', name=self.name + ' train_loss')
+        plt.plot(self.test_history, pen={'color': 'g', 'style': pg.QtCore.Qt.DashLine}, name=self.name + ' test_loss')
+
+    def fit(self, data):
+        if isinstance(data, TSeries):
+            y = data.data
+        else:
+            y = data
+
         start = time.time()
-        yoff = y[-1]
-        amp = y.std()
+        yoffset = y[0]
+        yscale = 100.0
+        tscale = 100.0
 
-        y = (y - yoff) / amp
+        y = (y - yoffset) * yscale
 
-        fit = model.predict(y[None, :])[0]
-
+        fit = self.model.predict(y[None, :])[0]
+        fit = [
+            fit[0] / yscale + yoffset,
+            fit[1] / yscale,
+            fit[2] / tscale,
+            fit[3] / tscale,
+        ]
+        assert np.all(np.isfinite(fit))
         return {
             'fit': fit,
-            'yoffset': fit[0] * amp + yoff,
-            'amp': fit[1] * amp,
+            'yoffset': fit[0],
+            'amp': fit[1],
             'rise_time': fit[2],
             'decay_tau': fit[3],
-            'init_yoffset': yoff,
-            'init_amp': amp,
+            'init_yoffset': yoffset,
+            'init_yscale': yscale,
+            'init_tscale': tscale,
             'fit_time': time.time() - start,
         }
 
@@ -278,10 +354,9 @@ class PspMLMethod:
 class PspGenerator:
     params = ['yoffset', 'amp', 'rise_time', 'decay_tau']
     dtype = [
-        ('x', object),
-        ('y', object),
-        ('t', object),
-        ('true_y', object),
+        ('params', object),
+        ('data', object),
+        ('true_data', object),
         ('yoffset', float),
         ('amp', float),
         ('rise_time', float),
@@ -290,52 +365,54 @@ class PspGenerator:
 
     def __init__(self, duration=0.4, sample_rate=50000):
         self.sample_rate = sample_rate
-        self.dt = 1.0 / sample_rate
-        self.t = np.arange(0, duration, self.dt)
-        
+        self.duration = duration
+        self.template = TSeries(np.zeros(int(duration*sample_rate)), sample_rate=sample_rate)
+
     def make_example(self):
         yoffset = np.random.uniform(-80e-3, -60e-3)
         amp = np.random.uniform(-10e-3, 10e-3)
         rise_t = np.random.uniform(0.5e-3, 10e-3)
         decay_tau = np.random.uniform(2, 10) * rise_t
 
-        x = yoffset, amp, rise_t, decay_tau
-        true_y = PspFitMethod.psp_fn(x, self.t)
-        y = true_y + self.make_noise(self.t)
+        params = yoffset, amp, rise_t, decay_tau
+        true_y = PspFitMethod.psp_fn(params, self.template.time_values)
+        y = true_y + self.make_noise()
 
         return {
-            'x': x, 
-            'y': y,
-            't': self.t,
-            'true_y': true_y,
-            'yoffset': x[0],
-            'amp': x[1],
-            'rise_time': x[2],
-            'decay_tau': x[3],
+            'data': self.template.copy(data=y),
+            'true_data': self.template.copy(data=true_y),
+            'params': params,
+            'yoffset': params[0],
+            'amp': params[1],
+            'rise_time': params[2],
+            'decay_tau': params[3],
         }
 
-    def make_noise(self, t):
-        kernel_t = np.arange(0, 0.1, self.dt)
+    def make_noise(self):
+        n_samp = len(self.template)
+        kernel_t = np.arange(0, 0.1, self.template.dt)
         tau = np.random.uniform(10e-3, 100e-3)
         kernel = 0.01 * np.exp(-kernel_t / tau)
 
         # noise = 0.02 * np.random.normal(size=len(t))
         # noise = scipy.ndimage.gaussian_filter(noise, 4)
         noise_amp = np.random.uniform(0.001, 0.003)
-        noise = noise_amp * np.random.normal(size=len(t) + len(kernel_t))
+        noise = noise_amp * np.random.normal(size=n_samp + len(kernel_t))
         noise = np.convolve(noise, kernel, 'valid')
 
-        return noise[:len(t)]
+        return noise[:n_samp]
 
 
 if __name__ == '__main__':
-    pg.mkQApp()
+    app = pg.mkQApp()
     pg.dbg()
 
     sample_rate = 50000
-    n_train = 1000
-    n_test = 300
-    n_epochs = 100
+    duration = 0.1
+    n_samp = int(duration * sample_rate)
+    n_train = 2000
+    n_test = 500
+    n_epochs = 200
 
     # generator = ExpGenerator(duration=0.4, sample_rate=sample_rate)
     
@@ -350,20 +427,20 @@ if __name__ == '__main__':
 
     generator = PspGenerator(duration=0.1, sample_rate=sample_rate)
 
-    ml_method = PspMLMethod(name='nn_predict')
     methods = [
         PspFitMethod(name='minimize'),
-        ml_method,
+        PspMLMethod(name='nn_predict', input_size=n_samp),
     ]
 
     dtype = generator.dtype.copy()
+    dtype.append(('training', bool))
 
     for method in methods:
         pfx = method.name + '_'
         for field in method.dtype:
             dtype.append((pfx + field[0], field[1]))
         dtype.extend([
-            (pfx+'fit_y', object),
+            (pfx+'fit_data', object),
             (pfx+'true_err', float),
         ])
         for par_name in method.params:
@@ -380,50 +457,57 @@ if __name__ == '__main__':
             if dlg.wasCanceled():
                 raise Exception("User cancel")
 
+        examples[:n_train]['training'] = True
+        examples[n_train:]['training'] = False
+
+        n_params = len(generator.params)
+        example_len = len(examples[0]['data'])
+        train_params = np.empty((n_train, n_params))
+        train_data = np.empty((n_train, example_len))
+        test_params = np.empty((n_test, n_params))
+        test_data = np.empty((n_test, example_len))
+        for i in range(n_train):
+            train_params[i] = examples[i]['params']
+            train_data[i] = examples[i]['data'].data
+        for i in range(n_test):
+            test_params[i] = examples[n_train+i]['params']
+            test_data[i] = examples[n_train+i]['data'].data        
+
 
     with pg.ProgressDialog("training hard..", maximum=n_train) as dlg:
-        model = Sequential()
-        model.add(Dense(100, input_dim=len(examples[0]['y']), kernel_initializer='normal', activation='relu'))
-        model.add(Dense(4, kernel_initializer='normal'))
-        model.compile(loss='mean_squared_error', optimizer='adam')
-        ml_method.model = model
-
-        train_x = np.empty((n_train, len(examples[0]['x'])))
-        train_y = np.empty((n_train, len(examples[0]['y'])))
-        test_x = np.empty((n_test, len(examples[0]['x'])))
-        test_y = np.empty((n_test, len(examples[0]['y'])))
-        for i in range(n_train):
-            train_x[i] = examples[i]['x']
-            train_y[i] = examples[i]['y']
-        for i in range(n_test):
-            test_x[i] = examples[n_train+i]['x']
-            test_y[i] = examples[n_train+i]['y']
+        train_plt = pg.plot()
+        train_plt.addLegend()
 
         for i in range(n_epochs):
-            model.fit(train_y, train_x, epochs=1)
+            train_plt.clear()
+            for method in methods:
+                method.train_epoch(train_data, train_params, test_data, test_params)
+                method.plot_training_history(train_plt)
+            app.processEvents()
+
             dlg += 1
             if dlg.wasCanceled():
                 raise Exception("User cancel")
         
 
-    with pg.ProgressDialog("fitting, don't you think?", maximum=n_test) as dlg:
-        for i in range(n_test):
-            ex = examples[n_train + i]
-            y = ex['y']
-            t = ex['t']
-            x = ex['x']
-            true_y = ex['true_y']
+    with pg.ProgressDialog("fitting, don't you think?", maximum=n_train+n_test) as dlg:
+        for i in range(n_train+n_test):
+            ex = examples[i]
+            data = ex['data']
+            t = data.time_values
+            params = ex['params']
+            true_data = ex['true_data']
             for method in methods:
                 pfx = method.name + '_'
-                result = method.fit(y, t)
+                result = method.fit(data)
                 for k,v in result.items():
                     ex[pfx+k] = v
                 try:
                     fit_y = method.eval(result, t)
-                    ex[pfx+'fit_y'] = fit_y
-                    ex[pfx+'true_err'] = np.linalg.norm(true_y - fit_y)
+                    ex[pfx+'fit_data'] = data.copy(data=fit_y)
+                    ex[pfx+'true_err'] = np.linalg.norm(true_data.data - fit_y)
                 except:
-                    pass
+                    pg.debug.printExc()
                 for pname in method.params:
                     ex[pfx+pname+'_err'] = ex[pname] - result[pname]
             dlg += 1
@@ -459,11 +543,16 @@ if __name__ == '__main__':
         plt.clear()
         for pt in pts:
             d = pt.data()
-            plt.plot(d['t'], d['y'], antialias=True, name='y')
-            plt.plot(d['t'], d['true_y'], pen={'color': 'w', 'style': pg.QtCore.Qt.DashLine}, antialias=True, name='true_y')
+            t = d['data'].time_values
+            y = d['data'].data
+            plt.plot(t, y, antialias=True, name='y')
+            plt.plot(t, d['true_data'].data, pen={'color': 'w', 'style': pg.QtCore.Qt.DashLine}, antialias=True, name='true_y')
             for i,method in enumerate(methods):
                 pfx = method.name + '_'
-                plt.plot(d['t'], d[pfx+'fit_y'], pen=(i, 5), antialias=True, name=method.name)
+                data = d[pfx+'fit_data']
+                if data is None:
+                    continue
+                plt.plot(t, data.data, pen=(i, 5), antialias=True, name=method.name)
 
             print("----------")
             for n in d.dtype.names:
