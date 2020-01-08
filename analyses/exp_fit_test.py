@@ -239,7 +239,7 @@ class PspFitMethod:
 class PspMLMethod:
     params = ['yoffset', 'amp', 'rise_time', 'decay_tau']
     dtype = [
-        # ('fit', object),
+        ('fit', object),
         ('yoffset', float),
         ('amp', float),
         ('rise_time', float),
