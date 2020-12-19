@@ -41,10 +41,7 @@ class MultiPatchSyncRecording(MiesSyncRecording):
         else:
             return MultiPatchRecording(miesrec)
 
-    def baseline_regions(self, settling_time=100e-3):
-        """Return a list of start,stop pairs indicating regions during the recording that are expected to be quiescent
-        due to absence of pulses.
-        """
+    def baseline_mask(self, settling_time=100e-3):
         if self._baseline_mask is None:
             pri = self.recordings[0]['primary']
             mask = np.zeros(len(pri), dtype=bool)
@@ -60,8 +57,15 @@ class MultiPatchSyncRecording(MiesSyncRecording):
             # mask is False in quiescent regions
             self._baseline_mask = mask
 
+        return self._baseline_mask
+
+    def baseline_regions(self, settling_time=100e-3):
+        """Return a list of start,stop pairs indicating regions during the recording that are expected to be quiescent
+        due to absence of pulses.
+        """
+        mask = self.baseline_mask(settling_time)
+
         if self._baseline_regions is None:
-            mask = self._baseline_mask
             starts = list(np.argwhere(~mask[1:] & mask[:-1])[:,0])
             if not mask[0]:
                 starts.insert(0, 0)
@@ -70,6 +74,7 @@ class MultiPatchSyncRecording(MiesSyncRecording):
                 stops.append(len(mask))
             
             baseline_inds = [r for r in zip(starts, stops) if r[1] > r[0]]
+            pri = self.recordings[0]['primary']
             self._baseline_regions = [(pri.time_at(i0), pri.time_at(i1)) for i0, i1 in baseline_inds]
 
         return self._baseline_regions

@@ -13,6 +13,7 @@ from .patch_seq import PatchSeqPipelineModule
 from .gap_junction import GapJunctionPipelineModule
 from .intrinsic import IntrinsicPipelineModule
 from .cortical_location import CortexLocationPipelineModule
+from .synaptic_events import SynapticEventsPipelineModule
 
 
 class MultipatchPipeline(Pipeline):
@@ -32,7 +33,8 @@ class MultipatchPipeline(Pipeline):
         #SynapsePredictionPipelineModule,
         RestingStatePipelineModule,
         DynamicsPipelineModule,
-        CortexLocationPipelineModule
+        CortexLocationPipelineModule,
+        SynapticEventsPipelineModule,
     ]
     
     def __init__(self, database, config):
